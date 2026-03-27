@@ -492,31 +492,33 @@ function Start-Robocopy {
     $script:process.StartInfo = $psi
     $script:process.EnableRaisingEvents = $true
 
-    # Use a timer to poll output instead of async events (more reliable in WPF)
-    $timer = New-Object System.Windows.Threading.DispatcherTimer
-    $timer.Interval = [TimeSpan]::FromMilliseconds(200)
+    # Capture the dispatcher for marshalling async events back to UI thread
+    $dispatcher = $window.Dispatcher
 
-    $timer.Add_Tick({
-        if ($null -eq $script:process) { return }
+    # Async output handler — runs on background thread, dispatches to UI
+    $script:process.Add_OutputDataReceived({
+        param($sender, $e)
+        if ($null -ne $e.Data) {
+            $dispatcher.Invoke([Action]{
+                $txtOutput.AppendText("$($e.Data)`r`n")
+                $txtOutput.ScrollToEnd()
+            })
+        }
+    })
 
-        try {
-            # Read available output
-            while (-not $script:process.StandardOutput.EndOfStream) {
-                $line = $script:process.StandardOutput.ReadLine()
-                if ($null -ne $line) {
-                    $txtOutput.AppendText("$line`r`n")
-                    $txtOutput.ScrollToEnd()
-                }
-                # Process UI events periodically
-                [System.Windows.Threading.Dispatcher]::CurrentDispatcher.Invoke(
-                    [System.Windows.Threading.DispatcherPriority]::Background,
-                    [Action]{ }
-                )
-            }
-        } catch {}
+    $script:process.Add_ErrorDataReceived({
+        param($sender, $e)
+        if ($null -ne $e.Data) {
+            $dispatcher.Invoke([Action]{
+                $txtOutput.AppendText("ERR: $($e.Data)`r`n")
+                $txtOutput.ScrollToEnd()
+            })
+        }
+    })
 
-        if ($script:process.HasExited) {
-            $timer.Stop()
+    # Exited handler — fires when process ends
+    $script:process.Add_Exited({
+        $dispatcher.Invoke([Action]{
             $exit = $script:process.ExitCode
             $script:process = $null
 
@@ -532,12 +534,13 @@ function Start-Robocopy {
                 $lblStatus.Text = "Error (exit code: $exit)"
                 $lblStatus.Foreground = [System.Windows.Media.Brushes]::Salmon
             }
-        }
-    }.GetNewClosure())
+        })
+    })
 
     try {
         $script:process.Start() | Out-Null
-        $timer.Start()
+        $script:process.BeginOutputReadLine()
+        $script:process.BeginErrorReadLine()
     } catch {
         $txtOutput.Text = "Failed to start robocopy: $_"
         $lblStatus.Text = "Error"
